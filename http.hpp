@@ -7,8 +7,16 @@
 #include <utility>
 #include <regex>
 
+#ifndef HTTP_MAX_HEADER_SIZE
 #define HTTP_MAX_HEADER_SIZE 16 * 1024        // 16KB
+#endif
+#ifndef HTTP_RESPONSE_BUFFER_SIZE
 #define HTTP_RESPONSE_BUFFER_SIZE 1024 * 1024 // 1MB
+#endif
+#ifndef HTTP_QUERY_BUFFER_SIZE
+#define HTTP_QUERY_BUFFER_SIZE 512 
+#endif
+
 #define HTTP_HEADER_SEPARATOR "\r\n"
 #define HTTP_SEPARATOR "\r\n\r\n"
 
@@ -52,14 +60,14 @@ namespace sp
         uint64_t _size;
         std::vector<char *> _headerPtrs;
 
-        void create(char *content)
+        uint64_t create(char *content)
         {
             _content = content;
             char *contentEnd = strstr(content, HTTP_SEPARATOR);
             strcpy(contentEnd, "\0");
             _size = sizeof(content);
             if (_size == 0)
-                return;
+                return 0;
             char *line = content;
 
             while (line)
@@ -73,6 +81,7 @@ namespace sp
                 _headerPtrs.push_back((char *)ltrim(value));
                 line = lineend + 2;
             }
+            return _size;
         }
         char *get(const std::string &key)
         {
@@ -127,8 +136,13 @@ namespace sp
         char *_path = nullptr;
         char *_userAgent = nullptr;
         char clientIP[16] = {0};
+        char * _temporaryBuffer = nullptr;
+        uint32_t _temporaryBufferSize = 0;
+        uint32_t _readSoFar = 0;
 
         HTTPHeaders _headers;
+        char* _body = nullptr;
+        bool _bodyComplete = false;
 
         int32_t _clientSocket = 0;
         sockaddr_in _clientAddress = {};
@@ -142,6 +156,9 @@ namespace sp
 
         void __processRequest(char *buffer, uint32_t size)
         {
+            _temporaryBuffer = buffer;
+            _temporaryBufferSize = size;
+            
             int32_t bytesReceived = read(_clientSocket, buffer, size - 1);
             if (bytesReceived == -1)
             {
@@ -151,6 +168,8 @@ namespace sp
             buffer[size] = '\0';
             char *start = buffer;
             char *lineend = strstr(buffer, HTTP_HEADER_SEPARATOR);
+            char* body = strstr(buffer, HTTP_SEPARATOR);
+            body = body + 4;
             char *method = strtok(start, " ");
             _method = HTTPgetMethod(method);
             _path = strtok(nullptr, " ");
@@ -165,13 +184,100 @@ namespace sp
             _contentType = _headers.get("Content-Type");
             _userAgent = _headers.get("User-Agent");
 
-            // url.create(_path);
+            //process body if any content length is unreliable
+            int bodySize = 0;
+            if (body)
+            {
+                bodySize = strlen(body);
+                _readSoFar = bodySize;
+                if (bodySize > 0)
+                    _body = body;
+            }
+
+            _bodyComplete = _contentLength? bodySize <= _contentLength : true;
 
             printf("%.7s [ %5.2f kb ]-> %s\n", method, (float)_contentLength / 1024, _path);
         };
 
-        void print() {
+        bool readNext()
+        {
+            if (_bodyComplete)
+                return false;
+            
+            int32_t bytesReceived = read(_clientSocket, _temporaryBuffer, _temporaryBufferSize - 1);
+            if (bytesReceived == -1)
+            {
+                fprintf(stderr, "err:: Failer to receive data from client\n");
+                return false;
+            }
+            if(bytesReceived == 0)
+            {
+                _bodyComplete = true;
+                return false;
+            }
+            _temporaryBuffer[bytesReceived] = '\0';
+            _body = _temporaryBuffer;
+            if(_readSoFar + bytesReceived >= _contentLength)
+            {
+                _bodyComplete = true;
+                return false;
+            }
+            return true;
         };
+
+        static std::unordered_map<char *, char *> parseFormData(char *data)
+        {
+            std::unordered_map<char *, char *> formdata;
+            char *line = data;
+            while (line)
+            {
+                char *lineend = strstr(line, "&");
+                if (lineend == nullptr)
+                    break;
+                char *key = strtok(line, "=");
+                char *value = strtok(nullptr, "&");
+                formdata[key] = value;
+                line = lineend + 1;
+            }
+            return formdata;
+        };
+
+        static std::unordered_map<char *, char *> parseQueryParams(char *data)
+        {
+            char queryBuffer[HTTP_QUERY_BUFFER_SIZE] = {0};
+            strcpy(queryBuffer, data);
+            std::unordered_map<char *, char *> queryparams;
+            char *line = queryBuffer;
+            while (line)
+            {
+                char *lineend = strstr(line, "&");
+                if (lineend == nullptr)
+                    break;
+                char *key = strtok(line, "=");
+                char *value = strtok(nullptr, "&");
+                queryparams[key] = value;
+                line = lineend + 1;
+            }
+            //last key value
+            char *key = strtok(line, "=");
+            if (key)
+            {
+                char *value = strtok(nullptr, "&");
+                queryparams[key] = value;
+            }
+            return queryparams;
+        };
+
+        std::unordered_map<char *, char *> getQueryParams()
+        {
+            char *query = strchr(_path, '?');
+            if (query == nullptr)
+                return std::unordered_map<char *, char *>();
+            return parseQueryParams(query + 1);
+        };
+        
+
+
     };
 
     struct HTTPResponse
@@ -223,7 +329,6 @@ namespace sp
                 }
 
                 _responseProcessBuffer[writeSize] = '\0';
-                printf("Sending data\n%s\n", _responseProcessBuffer);
 
                 ::send(_clientSocket, _responseProcessBuffer, writeSize, 0);
                 _headerDoneSending = true;
@@ -313,7 +418,6 @@ namespace sp
                                {
                     char *buffer = (char *)(dataPtrs[0]);
                     job.request.__processRequest(buffer, HTTP_MAX_HEADER_SIZE - 1);
-                    job.request.print();
                     char * responseBuffer = (char *)(dataPtrs[1]);
                     job.response._responseProcessBuffer = responseBuffer;
                     job.response._responseProcessingBufferSize = HTTP_RESPONSE_BUFFER_SIZE -1;
@@ -347,4 +451,6 @@ namespace sp
             }
         };
     };
+
+
 };
