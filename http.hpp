@@ -7,7 +7,8 @@
 #include <utility>
 #include <regex>
 
-#define HTTP_MAX_HEADER_SIZE 8 * 1024 // 8KB
+#define HTTP_MAX_HEADER_SIZE 16 * 1024        // 16KB
+#define HTTP_RESPONSE_BUFFER_SIZE 1024 * 1024 // 1MB
 #define HTTP_HEADER_SEPARATOR "\r\n"
 #define HTTP_SEPARATOR "\r\n\r\n"
 
@@ -45,55 +46,6 @@ namespace sp
         return HTTP_INVALID;
     }
 
-
-    struct URL
-    {
-        char* protocol = nullptr;
-        char* host = nullptr;
-        char* path = nullptr;
-        char* query = nullptr;
-        char* fragment = nullptr;
-
-        void create(const char* url)
-        {
-            char* urlcopy = strdup(url);
-            char* protocolEnd = strstr(urlcopy, "://");
-            if(protocolEnd != nullptr)
-            {
-                *protocolEnd = '\0';
-                protocol = urlcopy;
-                urlcopy = protocolEnd + 3;
-            }
-            char* pathStart = strchr(urlcopy, '/');
-            if(pathStart != nullptr)
-            {
-                *pathStart = '\0';
-                host = urlcopy;
-                path = pathStart + 1;
-            }
-            char* queryStart = strchr(path, '?');
-            if(queryStart != nullptr)
-            {
-                *queryStart = '\0';
-                query = queryStart + 1;
-            }
-            char* fragmentStart = strchr(query, '#');
-            if(fragmentStart != nullptr)
-            {
-                *fragmentStart = '\0';
-                fragment = fragmentStart + 1;
-            }
-        }
-        void print()
-        {
-            printf("Protocol: %s\n", protocol);
-            printf("Host: %s\n", host);
-            printf("Path: %s\n", path);
-            printf("Query: %s\n", query);
-            printf("Fragment: %s\n", fragment);
-        }
-    };
-
     struct HTTPHeaders
     {
         char *_content;
@@ -103,26 +55,26 @@ namespace sp
         void create(char *content)
         {
             _content = content;
-            char* contentEnd = strstr(content, HTTP_SEPARATOR);
+            char *contentEnd = strstr(content, HTTP_SEPARATOR);
             strcpy(contentEnd, "\0");
             _size = sizeof(content);
+            if (_size == 0)
+                return;
             char *line = content;
-            char * lastfour = content + _size - 4;
 
-            while(line)
+            while (line)
             {
                 char *lineend = strstr(line, HTTP_HEADER_SEPARATOR);
-                if(lineend == nullptr) 
+                if (lineend == nullptr)
                     break;
-                char *key = strtok(line, ": ");
+                char *key = strtok(line, ":");
                 char *value = strtok(nullptr, HTTP_HEADER_SEPARATOR);
                 _headerPtrs.push_back(key);
-                _headerPtrs.push_back((char*)ltrim(value));
+                _headerPtrs.push_back((char *)ltrim(value));
                 line = lineend + 2;
             }
-
         }
-        char* get(const std::string &key)
+        char *get(const std::string &key)
         {
             for (uint32_t i = 0; i < _headerPtrs.size(); i += 2)
             {
@@ -132,20 +84,35 @@ namespace sp
             return nullptr;
         }
 
-        static std::string make(const char *keys, const char *values, uint32_t count)
+        void set(char *key, char *&value)
         {
-            std::string result;
-            for (uint32_t i = 0; i < count; ++i)
+            for (uint32_t i = 0; i < _headerPtrs.size(); i += 2)
             {
-                result += keys[i];
-                result += ": ";
-                result += values[i];
-                result += HTTP_HEADER_SEPARATOR;
+                if (strcmp(_headerPtrs[i], key) == 0)
+                {
+                    _headerPtrs[i + 1] = value;
+                    return;
+                }
             }
-            return result;
+
+            _headerPtrs.push_back((char *)key);
+            _headerPtrs.push_back((char *)value);
         }
 
-             int32_t count() const
+        uint32_t print(char *buffer, uint32_t size)
+        {
+            uint32_t offset = 0;
+            for (uint32_t i = 0; i < _headerPtrs.size(); i += 2)
+            {
+                offset += sprintf(buffer + offset, "%s: %s\r\n", _headerPtrs[i], _headerPtrs[i + 1]);
+                if (offset >= size - 2)
+                    break;
+            }
+            offset += sprintf(buffer + offset, "\r\n");
+            return offset;
+        }
+
+        int32_t count() const
         {
             return _headerPtrs.size() / 2;
         };
@@ -154,22 +121,19 @@ namespace sp
     struct HTTPRequest
     {
         uint32_t _method = -1;
-        char* _version = nullptr;
+        char *_version = nullptr;
         uint32_t _contentLength = 0;
-        char* _contentType = nullptr;
-        char* _path = nullptr;
-        char* _userAgent = nullptr;
+        char *_contentType = nullptr;
+        char *_path = nullptr;
+        char *_userAgent = nullptr;
         char clientIP[16] = {0};
-        URL url;
-
-
 
         HTTPHeaders _headers;
 
         int32_t _clientSocket = 0;
         sockaddr_in _clientAddress = {};
 
-        void create(const int32_t & clientSocket,const sockaddr_in & clientAddress)
+        void create(const int32_t &clientSocket, const sockaddr_in &clientAddress)
         {
             _clientSocket = clientSocket;
             _clientAddress = clientAddress;
@@ -191,44 +155,108 @@ namespace sp
             _method = HTTPgetMethod(method);
             _path = strtok(nullptr, " ");
             _version = strtok(nullptr, HTTP_SEPARATOR);
-            char* header_token = lineend + 2;
+            char *header_token = lineend + 2;
             _headers.create(header_token);
-            char * cl = _headers.get("Content-Length"); 
-            if(cl != nullptr)
+            char *cl = _headers.get("Content-Length");
+            if (cl != nullptr)
             {
                 _contentLength = atoi(cl);
             }
             _contentType = _headers.get("Content-Type");
             _userAgent = _headers.get("User-Agent");
-            
-            url.create(_path);
 
-            printf("%.7s [ %5.2f kb ]-> %s\n", method, (float)_contentLength/1024, _path);
-            
+            // url.create(_path);
+
+            printf("%.7s [ %5.2f kb ]-> %s\n", method, (float)_contentLength / 1024, _path);
         };
 
-        void print()
-        {
+        void print() {
         };
     };
 
     struct HTTPResponse
     {
-        int _clientSocket = 0;
+        char *_responseProcessBuffer = nullptr;
+        bool _headerDoneSending = false;
+        bool _doneSending = false;
+        int32_t _clientSocket = 0;
+        uint32_t _statusCode = 200;
+        uint32_t _contentLength = 0;
+        uint32_t _responseProcessingBufferSize = 0;
+        std::string _contentType = "text/plain";
+        HTTPHeaders _headers;
 
         void create(int clientSocket)
         {
             _clientSocket = clientSocket;
-        };
+        }
+
+        void setHeader(char *key, char *value)
+        {
+            _headers.set(key, value);
+        }
 
         void send(const char *data, uint32_t size)
         {
-            ::send(_clientSocket, data, size, 0);
-        };
+            char *dp = (char *)data;
+            int writeSize = 0;
+            if (!_headerDoneSending)
+            {
+                writeSize = sprintf(_responseProcessBuffer, "HTTP/1.1 %d OK\r\nContent-Type: %s\r\nContent-Length: %d\r\n", _statusCode, _contentType.c_str(), size);
+
+                writeSize += _headers.print(_responseProcessBuffer + writeSize, _responseProcessingBufferSize - writeSize);
+
+                char *body = _responseProcessBuffer + writeSize;
+                int canWrite = _responseProcessingBufferSize - writeSize;
+                if (size > canWrite)
+                {
+                    memcpy(body, dp, canWrite);
+                    dp += canWrite;
+                    size -= canWrite;
+                    writeSize += canWrite;
+                }
+                else
+                {
+                    memcpy(body, dp, size);
+                    writeSize += size;
+                    size = 0;
+                }
+
+                _responseProcessBuffer[writeSize] = '\0';
+                printf("Sending data\n%s\n", _responseProcessBuffer);
+
+                ::send(_clientSocket, _responseProcessBuffer, writeSize, 0);
+                _headerDoneSending = true;
+                return;
+            }
+            while (size > 0)
+            {
+                if (size > _responseProcessingBufferSize)
+                {
+                    ::send(_clientSocket, dp, _responseProcessingBufferSize, 0);
+                    dp += _responseProcessingBufferSize;
+                    size -= _responseProcessingBufferSize;
+                }
+                else
+                {
+                    ::send(_clientSocket, dp, size, 0);
+                    size = 0;
+                }
+            }
+        }
 
         void end()
         {
-            close(_clientSocket);
+            if (_clientSocket > 0 && !_doneSending)
+            {
+                close(_clientSocket);
+                _doneSending = true;
+            }
+        };
+
+        void setStatus(uint32_t statusCode)
+        {
+            _statusCode = statusCode;
         };
 
         void sendHelloWorld()
@@ -248,38 +276,50 @@ namespace sp
     {
         Server _server;
         ThreadPool<HTTPJob> _threadpool;
+        std::function<void(HTTPRequest &, HTTPResponse &)> _routerFunction = nullptr;
 
         bool create(uint16_t port, uint32_t threadCount = std::thread::hardware_concurrency())
         {
             sp::ServerConfig config;
             config.port = port;
-            if(!_server.create(config))
+            if (!_server.create(config))
                 return false;
 
-            _threadpool._onInit = [](void **dataptr)
+            if (!_routerFunction)
             {
-                *dataptr = malloc(HTTP_MAX_HEADER_SIZE);
+                fprintf(stderr, "err:: router function not set\n");
+                return false;
+            }
 
-                char *buffer = (char *)(*dataptr);
+            _threadpool._onInit = [](std::vector<void *> &dataPtrs)
+            {
+                dataPtrs.push_back(malloc(HTTP_MAX_HEADER_SIZE));
+                dataPtrs.push_back(malloc(HTTP_RESPONSE_BUFFER_SIZE));
+
+                char *buffer = (char *)(dataPtrs[0]);
                 strcpy(buffer, "Hello");
                 buffer[HTTP_MAX_HEADER_SIZE - 1] = '\0';
+                char *responseBuffer = (char *)(dataPtrs[1]);
+                responseBuffer[HTTP_RESPONSE_BUFFER_SIZE - 1] = '\0';
             };
 
-            _threadpool._onDestroy = [](void *dataptr)
+            _threadpool._onDestroy = [](std::vector<void *> &dataptr)
             {
-                free(dataptr);
+                for (auto ptr : dataptr)
+                    free(ptr);
             };
 
-            _threadpool.create([&](HTTPJob &job, void *dataptr)
-                    {
-                    char *buffer = (char *)dataptr;
+            _threadpool.create([&](HTTPJob &job, const std::vector<void *> &dataPtrs)
+                               {
+                    char *buffer = (char *)(dataPtrs[0]);
                     job.request.__processRequest(buffer, HTTP_MAX_HEADER_SIZE - 1);
                     job.request.print();
-
-
-                    job.response.sendHelloWorld();
+                    char * responseBuffer = (char *)(dataPtrs[1]);
+                    job.response._responseProcessBuffer = responseBuffer;
+                    job.response._responseProcessingBufferSize = HTTP_RESPONSE_BUFFER_SIZE -1;
+                    _routerFunction(job.request, job.response);
                     job.response.end(); },
-                    threadCount);
+                               threadCount);
             return true;
         };
 
